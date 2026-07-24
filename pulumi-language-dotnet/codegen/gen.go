@@ -147,8 +147,9 @@ type modContext struct {
 	liftSingleValueMethodReturns bool
 
 	// The root namespace to use, if any.
-	rootNamespace    string
-	parameterization *schema.Parameterization
+	rootNamespace             string
+	parameterization          *schema.Parameterization
+	extensionParameterization *schema.ExtensionParameterization
 }
 
 func (mod *modContext) RootNamespace() string {
@@ -213,7 +214,12 @@ func (mod *modContext) tokenToNamespace(tok string, qualifier string) string {
 	components := strings.Split(tok, ":")
 	contract.Assertf(len(components) == 3, "malformed token %v", tok)
 
-	pkg, nsName := mod.RootNamespace()+"."+namespaceName(mod.namespaces, components[0]), mod.pkg.TokenToModule(tok)
+	pkgName := components[0]
+	if mod.extensionParameterization != nil && pkgName == mod.extensionParameterization.BaseProvider.Name {
+		pkgName = mod.pkg.Name()
+	}
+
+	pkg, nsName := mod.RootNamespace()+"."+namespaceName(mod.namespaces, pkgName), mod.pkg.TokenToModule(tok)
 
 	if mod.isK8sCompatMode() {
 		if qualifier != "" {
@@ -977,7 +983,7 @@ func (mod *modContext) genResource(w io.Writer, r *schema.Resource) error {
 
 	fmt.Fprintf(w, "        public %s(string name, %s args%s, %s? options = null)\n", className, argsType, argsDefault, optionsType)
 	if r.IsComponent {
-		if mod.parameterization != nil {
+		if mod.parameterization != nil || mod.extensionParameterization != nil {
 			fmt.Fprintf(w, "            : base(\"%s\", name, %s, MakeResourceOptions(options, \"\"), remote: true, %s)\n",
 				tok,
 				argsOverride,
@@ -986,7 +992,7 @@ func (mod *modContext) genResource(w io.Writer, r *schema.Resource) error {
 			fmt.Fprintf(w, "            : base(\"%s\", name, %s, MakeResourceOptions(options, \"\"), remote: true)\n", tok, argsOverride)
 		}
 	} else {
-		if mod.parameterization != nil {
+		if mod.parameterization != nil || mod.extensionParameterization != nil {
 			fmt.Fprintf(w, "            : base(\"%s\", name, %s, MakeResourceOptions(options, \"\"), %s)\n",
 				tok,
 				argsOverride,
@@ -1020,7 +1026,7 @@ func (mod *modContext) genResource(w io.Writer, r *schema.Resource) error {
 
 		fmt.Fprintf(w, "\n")
 		fmt.Fprintf(w, "        private %s(string name, Input<string> id, %s%s? options = null)\n", className, stateParam, optionsType)
-		if mod.parameterization != nil {
+		if mod.parameterization != nil || mod.extensionParameterization != nil {
 			fmt.Fprintf(w, "            : base(\"%s\", name, %s, MakeResourceOptions(options, id), %s)\n",
 				tok,
 				stateRef,
@@ -1195,7 +1201,7 @@ func (mod *modContext) genResource(w io.Writer, r *schema.Resource) error {
 		}
 
 		fmt.Fprintf(w, "        public %s %s(%s)\n", returnType, methodName, argsParamDef)
-		if mod.parameterization != nil {
+		if mod.parameterization != nil || mod.extensionParameterization != nil {
 			// pass null for CallOptions parameter
 			fmt.Fprintf(w, "            => global::Pulumi.Deployment.Instance.Call%s(\"%s\", %s, this, null, %s)%s;\n",
 				typeParameter, fun.Token, argsParamRef, "Utilities.PackageParameterization()", lift)
@@ -1453,7 +1459,7 @@ func (mod *modContext) genFunction(w io.Writer, fun *schema.Function) error {
 		// new line and indent
 		fmt.Fprint(w, "            ")
 		fmt.Fprintf(w, "=> global::Pulumi.Deployment.Instance.%sAsync%s", invokeCall, typeParamOrEmpty(typeParameter))
-		if mod.parameterization != nil {
+		if mod.parameterization != nil || mod.extensionParameterization != nil {
 			fmt.Fprintf(w, "(\"%s\", %s, options.WithDefaults(), %s);\n",
 				fun.Token,
 				argsParamRef,
@@ -1500,7 +1506,7 @@ func (mod *modContext) genFunction(w io.Writer, fun *schema.Function) error {
 		// full invoke call
 		fmt.Fprint(w, "return await global::Pulumi.Deployment.Instance.")
 		fmt.Fprintf(w, "%sAsync%s", invokeCall, typeParamOrEmpty(typeParameter))
-		if mod.parameterization != nil {
+		if mod.parameterization != nil || mod.extensionParameterization != nil {
 			fmt.Fprintf(w, "(\"%s\", args, invokeOptions.WithDefaults(), Utilities.PackageParameterization());\n", fun.Token)
 		} else {
 			fmt.Fprintf(w, "(\"%s\", args, invokeOptions.WithDefaults());\n", fun.Token)
@@ -1629,7 +1635,7 @@ func (mod *modContext) genFunctionOutputVersion(w io.Writer, fun *schema.Functio
 
 		fmt.Fprintf(w, "            => global::Pulumi.Deployment.Instance.%s%s(\"%s\", %s, options.WithDefaults()",
 			invokeCall, typeParamOrEmpty(typeParameter), fun.Token, outputArgsParamRef)
-		if mod.parameterization != nil {
+		if mod.parameterization != nil || mod.extensionParameterization != nil {
 			fmt.Fprint(w, ", Utilities.PackageParameterization()")
 		}
 		fmt.Fprint(w, ");\n")
@@ -1664,7 +1670,7 @@ func (mod *modContext) genFunctionOutputVersion(w io.Writer, fun *schema.Functio
 		fmt.Fprint(w, "            var args = new global::Pulumi.DictionaryInvokeArgs(builder.ToImmutableDictionary());\n")
 		fmt.Fprintf(w, "            return global::Pulumi.Deployment.Instance.%s%s(\"%s\", args, invokeOptions.WithDefaults()",
 			invokeCall, typeParamOrEmpty(typeParameter), fun.Token)
-		if mod.parameterization != nil {
+		if mod.parameterization != nil || mod.extensionParameterization != nil {
 			fmt.Fprint(w, ", Utilities.PackageParameterization()")
 		}
 		fmt.Fprint(w, ");\n")
@@ -2071,7 +2077,7 @@ func (mod *modContext) genUtilities() (string, error) {
 		ClassName:           "Utilities",
 		Tool:                mod.tool,
 		PluginDownloadURL:   def.PluginDownloadURL,
-		HasParameterization: def.Parameterization != nil,
+		HasParameterization: def.Parameterization != nil || def.ExtensionParameterization != nil,
 		PackageName:         def.Name,
 		PackageVersion:      version,
 	}
@@ -2081,6 +2087,12 @@ func (mod *modContext) genUtilities() (string, error) {
 		templateData.BaseProviderVersion = def.Parameterization.BasePlugin.Version.String()
 		templateData.BaseProviderPluginDownloadURL = def.PluginDownloadURL
 		templateData.ParameterValue = base64.StdEncoding.EncodeToString(def.Parameterization.Parameter)
+	} else if def.ExtensionParameterization != nil {
+		templateData.IsExtension = true
+		templateData.BaseProviderName = def.ExtensionParameterization.BaseProvider.Name
+		templateData.BaseProviderVersion = def.ExtensionParameterization.BaseProvider.Version.String()
+		templateData.BaseProviderPluginDownloadURL = def.PluginDownloadURL
+		templateData.ParameterValue = base64.StdEncoding.EncodeToString(def.ExtensionParameterization.Parameter)
 	}
 
 	err = csharpUtilitiesTemplate.Execute(w, templateData)
@@ -2317,6 +2329,14 @@ func genPackageMetadata(pkg *schema.Package,
 		}
 		pulumiPlugin.Name = pkg.Parameterization.BasePlugin.Name
 		pulumiPlugin.Version = pkg.Parameterization.BasePlugin.Version.String()
+	} else if pkg.ExtensionParameterization != nil {
+		pulumiPlugin.ExtensionParameterization = &plugin.PulumiParameterizationJSON{
+			Name:    pulumiPlugin.Name,
+			Version: pulumiPlugin.Version,
+			Value:   pkg.ExtensionParameterization.Parameter,
+		}
+		pulumiPlugin.Name = pkg.ExtensionParameterization.BaseProvider.Name
+		pulumiPlugin.Version = pkg.ExtensionParameterization.BaseProvider.Version.String()
 	}
 
 	plugin, err := (pulumiPlugin).JSON()
@@ -2454,7 +2474,9 @@ func generateModuleContextMap(tool string, pkg *schema.Package) (map[string]*mod
 
 	propertyNames := map[*schema.Property]string{}
 	computePropertyNames(pkg.Config, propertyNames)
-	computePropertyNames(pkg.Provider.InputProperties, propertyNames)
+	if pkg.Provider != nil {
+		computePropertyNames(pkg.Provider.InputProperties, propertyNames)
+	}
 	for _, r := range pkg.Resources {
 		if r.IsOverlay {
 			// This resource code is generated by the provider, so no further action is required.
@@ -2515,6 +2537,7 @@ func generateModuleContextMap(tool string, pkg *schema.Package) (map[string]*mod
 				dictionaryConstructors:       info.DictionaryConstructors,
 				liftSingleValueMethodReturns: info.LiftSingleValueMethodReturns,
 				parameterization:             pkg.Parameterization,
+				extensionParameterization:    pkg.ExtensionParameterization,
 			}
 
 			if modName != "" {
@@ -2563,7 +2586,9 @@ func generateModuleContextMap(tool string, pkg *schema.Package) (map[string]*mod
 		}
 	}
 
-	scanResource(pkg.Provider)
+	if pkg.Provider != nil {
+		scanResource(pkg.Provider)
+	}
 	for _, r := range pkg.Resources {
 		scanResource(r)
 	}
@@ -2667,12 +2692,6 @@ func LanguageResources(tool string, pkg *schema.Package) (map[string]LanguageRes
 func GeneratePackage(
 	tool string, pkg *schema.Package, extraFiles map[string][]byte, localDependencies map[string]string,
 ) (map[string][]byte, error) {
-	if pkg.ExtensionParameterization != nil {
-		// Extension-parameterized packages have no Provider resource and require dedicated
-		// codegen support (see pulumi/pulumi#23579) that .NET does not implement yet.
-		return nil, errors.New("extension-parameterized packages are not supported by the .NET SDK generator")
-	}
-
 	modules, info, err := generateModuleContextMap(tool, pkg)
 	if err != nil {
 		return nil, err
